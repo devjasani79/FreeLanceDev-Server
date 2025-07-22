@@ -1,0 +1,29 @@
+const express = require("express");
+const router = express.Router();
+const {
+  registerUser,
+  loginUser,
+  getAllFreelancers,
+  getMyProfile,
+  updateMyProfile,
+  deleteMyAccount,
+  requestReset,
+  verifyOtp,
+    updateProfilePic,
+} = require("../controllers/authController");
+const upload = require("../middleware/multer");
+const verifyToken = require("../middleware/verifyToken");
+
+// Public
+router.post("/register", registerUser);
+router.post("/login", loginUser);
+router.get("/freelancers", getAllFreelancers);
+router.post("/request-reset", requestReset);
+router.post("/verify-otp", verifyOtp);
+
+// Protected
+router.get("/me", verifyToken, getMyProfile);
+router.put("/update", verifyToken, updateMyProfile);
+router.delete("/delete", verifyToken, deleteMyAccount);
+router.put("/profile-pic", verifyToken, upload.single("image"), updateProfilePic);
+module.exports = router;
