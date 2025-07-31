@@ -5,10 +5,16 @@ const cloudinary = require("../utils/cloudinary");
 const storage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: "freelancehub/users", // change later for gigs, etc.
+    folder: (req, file) => {
+      if (req.baseUrl.includes("gigs")) {
+        return 'freelancehub/gigs';
+      }
+      return 'freelancehub/users';
+    },
     allowed_formats: ["jpg", "jpeg", "png"],
   },
 });
+
 
 const upload = multer({ storage });
 module.exports = upload;

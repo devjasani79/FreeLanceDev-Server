@@ -11,11 +11,13 @@ const {
   verifyOtp,
     updateProfilePic,
 } = require("../controllers/authController");
-const upload = require("../middleware/multer");
 const verifyToken = require("../middleware/verifyToken");
 
 // Public
-router.post("/register", registerUser);
+const upload = require('../middleware/multer');
+
+router.post('/register', upload.single('profilePic'), registerUser);
+
 router.post("/login", loginUser);
 router.get("/freelancers", getAllFreelancers);
 router.post("/request-reset", requestReset);
