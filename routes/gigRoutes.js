@@ -35,11 +35,11 @@ router.post(
   createGig
 );
 
-// Update gig: allow optional new uploads for thumbnail & images
-router.put(
-  '/:id',
+// Update Gig (PATCH)
+router.patch(
+  "/:id",
   verifyToken,
-  allowRoles(['freelancer']),
+  allowRoles(["freelancer"]),
   upload.fields([
     { name: "gigThumbnail", maxCount: 1 },
     { name: "gigImages", maxCount: 10 }
@@ -47,7 +47,28 @@ router.put(
   updateGig
 );
 
+
 // Delete gig
 router.delete('/:id', verifyToken, allowRoles(['freelancer']), deleteGig);
 
 module.exports = router;
+
+
+
+
+// // Update Gig (PATCH)
+// router.patch(
+//   "/:id",
+//   verifyToken,
+//   allowRoles(["freelancer"]),
+//   upload.fields([
+//     { name: "gigThumbnail", maxCount: 1 },
+//     { name: "gigImages", maxCount: 10 }
+//   ]),
+//   updateGig
+// );
+
+// // Delete Gig
+// router.delete("/:id", verifyToken, allowRoles(["freelancer"]), deleteGig);
+
+// module.exports = router;

@@ -1,7 +1,7 @@
 const Gig = require("../models/Gigs");
 const cloudinary = require("../utils/cloudinary");
 
-// Helper to parse JSON strings or accept arrays directly
+// Helper: Safely parse JSON string or return array directly
 const parseJSONorArray = (input) => {
   if (!input) return [];
   if (typeof input === "string") {
@@ -14,7 +14,17 @@ const parseJSONorArray = (input) => {
   return input;
 };
 
-// @route POST /api/gigs
+// Helper: Unified error response
+const handleError = (res, statusCode, message, error = null) => {
+  console.error(`❌ ${message}`, error || '');
+  return res.status(statusCode).json({ error: message });
+};
+
+/**
+ * @route   POST /api/gigs
+ * @desc    Create a new gig
+ * @access  Private
+ */
 exports.createGig = async (req, res) => {
   try {
     const {
@@ -22,39 +32,40 @@ exports.createGig = async (req, res) => {
       desc,
       category,
       keywords,
-      pricePlans, // JSON string or array
-      faqs,       // JSON string or array
-      requirements // JSON string or array
+      pricePlans,
+      faqs,
+      requirements,
     } = req.body;
 
+    // Basic validation
     if (!title || !desc || !category || !pricePlans) {
-      return res.status(400).json({ error: "Missing required fields" });
+      return handleError(res, 400, "Missing required fields");
     }
 
+    // Process fields
     const keywordList = keywords
       ? keywords.split(",").map((kw) => kw.trim().toLowerCase())
       : [];
 
-    // Parse complex fields
     const parsedPricePlans = parseJSONorArray(pricePlans);
     const parsedFaqs = parseJSONorArray(faqs);
     const parsedRequirements = parseJSONorArray(requirements);
 
     if (!Array.isArray(parsedPricePlans) || parsedPricePlans.length === 0) {
-      return res.status(400).json({ error: "pricePlans must be a non-empty array" });
+      return handleError(res, 400, "pricePlans must be a non-empty array");
     }
 
-    // Handle uploads: 
-    // Expecting 1 file for thumbnail (in req.files.gigThumbnail) and rest in req.files.gigImages (array)
-    // The multer setup must handle fields accordingly, see note below.
-
-    if (!req.files || !req.files.gigThumbnail || req.files.gigThumbnail.length === 0) {
-      return res.status(400).json({ error: "Gig thumbnail image is required" });
+    // File uploads
+    const gigThumbnail = req.files?.gigThumbnail?.[0]?.path;
+    if (!gigThumbnail) {
+      return handleError(res, 400, "Gig thumbnail image is required");
     }
 
-    const gigThumbnail = req.files.gigThumbnail[0].path; // single thumbnail URL
-    const gigImages = req.files.gigImages ? req.files.gigImages.map(file => file.path) : [];
+    const gigImages = req.files?.gigImages
+      ? req.files.gigImages.map((file) => file.path)
+      : [];
 
+    // Create gig
     const gig = await Gig.create({
       user: req.user._id,
       title,
@@ -70,107 +81,144 @@ exports.createGig = async (req, res) => {
 
     return res.status(201).json({ msg: "Gig created successfully ✅", gig });
   } catch (err) {
-    console.error("❌ createGig error:", err);
-    return res.status(500).json({ error: "Server Error" });
+    return handleError(res, 500, "Server error while creating gig", err);
   }
 };
 
-// @route GET /api/gigs
+/**
+ * @route   GET /api/gigs
+ * @desc    Get all gigs
+ * @access  Public
+ */
 exports.getAllGigs = async (req, res) => {
   try {
     const gigs = await Gig.find().populate("user", "name email role");
     res.status(200).json(gigs);
   } catch (err) {
-    console.error("Fetch gigs error:", err);
-    res.status(500).json({ error: "Server error" });
+    return handleError(res, 500, "Failed to fetch all gigs", err);
   }
 };
 
-// @route GET /api/gigs/:id
+/**
+ * @route   GET /api/gigs/:id
+ * @desc    Get gig by ID
+ * @access  Public
+ */
 exports.getGigById = async (req, res) => {
   try {
     const gig = await Gig.findById(req.params.id).populate("user", "name role");
-    if (!gig) return res.status(404).json({ msg: "Gig not found" });
+    if (!gig) return handleError(res, 404, "Gig not found");
     res.status(200).json(gig);
   } catch (err) {
-    console.error("Get gig by ID error:", err);
-    res.status(500).json({ error: "Server error" });
+    return handleError(res, 500, "Failed to fetch gig by ID", err);
   }
 };
-
-// @route PUT /api/gigs/:id
+// @route   PATCH /api/gigs/:id
+// @desc    Update an existing gig (supports dynamic fields, image deletion, uploads)
+// @access  Private
 exports.updateGig = async (req, res) => {
   try {
-    // Find existing gig - restrict by user
     const gig = await Gig.findOne({ _id: req.params.id, user: req.user._id });
-    if (!gig) return res.status(404).json({ msg: "Gig not found or unauthorized" });
+    if (!gig) return handleError(res, 404, "Gig not found or unauthorized");
 
     const {
       title,
       desc,
       category,
       keywords,
-      pricePlans, 
-      faqs,       
-      requirements, 
+      pricePlans,
+      faqs,
+      requirements,
+      deleteImages // Optional array of image URLs to remove
     } = req.body;
 
-    if (title) gig.title = title;
-    if (desc) gig.desc = desc;
-    if (category) gig.category = category;
-    if (keywords)
-      gig.keywords = keywords.split(",").map((kw) => kw.trim().toLowerCase());
-
-    if (pricePlans) {
-      const parsedPricePlans = parseJSONorArray(pricePlans);
-      if (Array.isArray(parsedPricePlans) && parsedPricePlans.length > 0) {
-        gig.pricePlans = parsedPricePlans;
-      }
+    // --- Basic fields update ---
+    if (title !== undefined) gig.title = title;
+    if (desc !== undefined) gig.desc = desc;
+    if (category !== undefined) gig.category = category;
+    if (keywords !== undefined) {
+      gig.keywords = keywords
+        ? keywords.split(",").map((kw) => kw.trim().toLowerCase())
+        : [];
     }
 
-    if (faqs) {
-      const parsedFaqs = parseJSONorArray(faqs);
-      gig.faqs = Array.isArray(parsedFaqs) ? parsedFaqs : gig.faqs;
+    // --- Structured fields ---
+    if (pricePlans !== undefined) {
+      const parsed = parseJSONorArray(pricePlans);
+      if (Array.isArray(parsed)) gig.pricePlans = parsed;
     }
 
-    if (requirements) {
-      const parsedRequirements = parseJSONorArray(requirements);
-      gig.requirements = Array.isArray(parsedRequirements) ? parsedRequirements : gig.requirements;
+    if (faqs !== undefined) {
+      const parsed = parseJSONorArray(faqs);
+      if (Array.isArray(parsed)) gig.faqs = parsed;
     }
 
-    // Update gigThumbnail if new one uploaded
-    if (req.files?.gigThumbnail && req.files.gigThumbnail.length > 0) {
+    if (requirements !== undefined) {
+      const parsed = parseJSONorArray(requirements);
+      if (Array.isArray(parsed)) gig.requirements = parsed;
+    }
+
+    // --- Handle image updates ---
+    if (req.files?.gigThumbnail?.[0]) {
       gig.gigThumbnail = req.files.gigThumbnail[0].path;
     }
 
-    // Append new uploaded gigImages if provided
-    if (req.files?.gigImages && req.files.gigImages.length > 0) {
-      const newImages = req.files.gigImages.map(file => file.path);
+    if (req.files?.gigImages?.length > 0) {
+      const newImages = req.files.gigImages.map((file) => file.path);
       gig.gigImages.push(...newImages);
     }
 
-    await gig.save();
+    // --- Handle image deletions ---
+    if (deleteImages && Array.isArray(deleteImages)) {
+      for (const imageUrl of deleteImages) {
+        // Remove from gigImages array
+        gig.gigImages = gig.gigImages.filter((img) => img !== imageUrl);
+        
+        // Optionally delete from cloud storage if needed
+        await cloudinary.uploader.destroy(imageUrl); // Uncomment if using Cloudinary
+      }
+      // If you want to delete the gigThumbnail as well
+      if (gig.gigThumbnail && deleteImages.includes(gig.gigThumbnail)) {
+        await cloudinary.uploader.destroy(gig.gigThumbnail); // Uncomment if using Cloudinary
+        gig.gigThumbnail = null; // Clear the thumbnail if deleted
+      }
+    
+    }
 
-    res.status(200).json({ msg: "Gig updated", gig });
+
+    await gig.save();
+    res.status(200).json({ msg: "Gig updated successfully ✅", gig });
+
   } catch (err) {
-    console.error("Update gig error:", err);
-    res.status(500).json({ error: "Server error" });
+    return handleError(res, 500, "Server error while updating gig", err);
   }
 };
 
-// @route DELETE /api/gigs/:id
+
+/**
+ * @route   DELETE /api/gigs/:id
+ * @desc    Delete a gig
+ * @access  Private
+ */
 exports.deleteGig = async (req, res) => {
   try {
-    const gig = await Gig.findOneAndDelete({ _id: req.params.id, user: req.user._id });
-    if (!gig) return res.status(404).json({ msg: "Gig not found or unauthorized" });
-    res.status(200).json({ msg: "Gig deleted" });
+    const gig = await Gig.findOneAndDelete({
+      _id: req.params.id,
+      user: req.user._id,
+    });
+
+    if (!gig) return handleError(res, 404, "Gig not found or unauthorized");
+    res.status(200).json({ msg: "Gig deleted successfully 🗑️" });
   } catch (err) {
-    console.error("Delete gig error:", err);
-    res.status(500).json({ error: "Server error" });
+    return handleError(res, 500, "Server error while deleting gig", err);
   }
 };
 
-// @route GET /api/gigs/my
+/**
+ * @route   GET /api/gigs/my
+ * @desc    Get gigs created by logged-in user
+ * @access  Private
+ */
 exports.getMyGigs = async (req, res) => {
   try {
     const gigs = await Gig.find({ user: req.user._id }).populate(
@@ -179,7 +227,6 @@ exports.getMyGigs = async (req, res) => {
     );
     res.status(200).json(gigs);
   } catch (err) {
-    console.error("Get my gigs error:", err);
-    res.status(500).json({ error: "Server error" });
+    return handleError(res, 500, "Server error while fetching user gigs", err);
   }
 };
