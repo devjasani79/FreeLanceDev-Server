@@ -1,42 +1,43 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
+const verifyToken = require("../middleware/verifyToken");
+const allowRoles = require("../middleware/allowRoles");
 const {
   createOrder,
-  getOrdersForUser,
+  getMyOrders,
   getOrderById,
   updateOrderStatus,
-} = require('../controllers/orderController');
-const verifyToken = require('../middleware/verifyToken');
-const allowRoles = require('../middleware/allowRoles');
+  requestRevision,
+  completeOrder,
+  cancelOrder,
+  getOrderStats
+} = require("../controllers/orderController");
 
-// Protected routes (all routes require authentication)
+// All routes require authentication
 router.use(verifyToken);
 
-/**
- * POST /orders
- * Create a new order after payment
- * Allowed roles: client (buyer)
- */
-router.post('/', allowRoles(['client']), createOrder);
+// Create new order (clients only)
+router.post("/", allowRoles(["client"]), createOrder);
 
-/**
- * GET /orders
- * Get orders for logged in user (buyer or seller)
- * Allowed roles: client, freelancer
- */
-router.get('/', allowRoles(['client', 'freelancer']), getOrdersForUser);
+// Get orders for current user
+router.get("/my-orders", getMyOrders);
 
-/**
- * GET /orders/:id
- * Get specific order details - buyer, seller or admin only
- * Allowed roles: client, freelancer, admin
- */
-router.get('/:id', allowRoles(['client', 'freelancer', 'admin']), getOrderById);
+// Get order statistics
+router.get("/stats", getOrderStats);
 
-/**
- * PATCH /orders/:id/status
- * Update order status - only seller (freelancer) or admin can update
- */
-router.patch('/:id/status', allowRoles(['freelancer', 'admin']), updateOrderStatus);
+// Get single order by ID
+router.get("/:orderId", getOrderById);
+
+// Update order status (freelancers only)
+router.patch("/:orderId/status", allowRoles(["freelancer"]), updateOrderStatus);
+
+// Request revision (clients only)
+router.post("/:orderId/revision", allowRoles(["client"]), requestRevision);
+
+// Complete order (clients only)
+router.patch("/:orderId/complete", allowRoles(["client"]), completeOrder);
+
+// Cancel order (both clients and freelancers)
+router.patch("/:orderId/cancel", cancelOrder);
 
 module.exports = router;

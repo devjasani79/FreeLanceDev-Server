@@ -1,257 +1,390 @@
-const Order = require('../models/Order');
-const Gig = require('../models/Gigs'); // Model, fix if your filename differs
-const User = require('../models/User');
+const Order = require("../models/Order");
+const User = require("../models/User");
+const Gigs = require("../models/Gigs");
+const Review = require("../models/Review");
 
-/**
- * CREATE ORDER (simulate payment for now)
- * Expects: { gigId, plan (object), buyerId, sellerId, amount, requirements }
- */
-const createOrder = async (req, res, next) => {
+// Create new order
+const createOrder = async (req, res) => {
   try {
-    const { gigId, plan, buyerId, sellerId, amount, requirements } = req.body;
+    const { gigId, plan, requirements } = req.body;
+    const buyerId = req.user.id;
 
-    // Validation
-    if (!gigId || !plan || !buyerId || !sellerId || !amount) {
-      return res.status(400).json({ message: 'Missing required fields' });
+    // Validate gig exists
+    const gig = await Gigs.findById(gigId).populate("user");
+    if (!gig) {
+      return res.status(404).json({ msg: "Gig not found" });
     }
 
-    // Gig existence check
-    const gig = await Gig.findById(gigId);
-    if (!gig) return res.status(404).json({ message: 'Gig not found' });
+    // Validate plan exists in gig
+    const selectedPlan = gig.pricePlans.find(p => p.tier === plan.tier);
+    if (!selectedPlan) {
+      return res.status(400).json({ msg: "Invalid plan selected" });
+    }
 
-    // (Later: validate plan within gig.pricePlans)
-    // (Later: validate roles match!)
-
+    // Create order
     const order = new Order({
-      gigId,
       buyerId,
-      sellerId,
-      plan,
-      amount,
-      requirements: requirements || "",
-      status: 'In Progress', // Simulate payment success
-      paymentStatus: 'Paid', // For future Stripe
+      sellerId: gig.user._id,
+      gigId,
+      plan: {
+        tier: selectedPlan.tier,
+        price: selectedPlan.price,
+        deliveryTime: selectedPlan.deliveryTime,
+        revisions: selectedPlan.revisions,
+        features: selectedPlan.features
+      },
+      requirements,
+      amount: selectedPlan.price,
+      revisionsLeft: selectedPlan.revisions
     });
 
     await order.save();
-    res.status(201).json(order);
-  } catch (err) {
-    next(err); // Pass to errorHandler middleware
+
+    // Populate references for response
+    await order.populate([
+      { path: "buyerId", select: "name email profilePic" },
+      { path: "sellerId", select: "name email profilePic" },
+      { path: "gigId", select: "title category gigThumbnail" }
+    ]);
+
+    res.status(201).json({
+      msg: "Order created successfully",
+      order
+    });
+  } catch (error) {
+    console.error("Create order error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-/**
- * GET all orders for logged-in user (buyer or seller)
- */
-const getOrdersForUser = async (req, res, next) => {
+// Get orders for current user (based on role)
+const getMyOrders = async (req, res) => {
   try {
-    const userId = req.user._id;
-    const role = req.user.role;
+    const userId = req.user.id;
+    const { status, page = 1, limit = 10 } = req.query;
 
-    const filter = (role === 'client')
-      ? { buyerId: userId }
-      : (role === 'freelancer')
-        ? { sellerId: userId }
-        : null;
+    let query = {};
+    
+    // Filter by user role
+    if (req.user.role === "client") {
+      query.buyerId = userId;
+    } else {
+      query.sellerId = userId;
+    }
 
-    if (!filter) return res.status(403).json({ message: 'Access denied' });
+    // Filter by status if provided
+    if (status && status !== "all") {
+      query.status = status;
+    }
 
-    const orders = await Order.find(filter)
-      .populate('gigId')
-      .populate('buyerId', 'name email')
-      .populate('sellerId', 'name email')
-      .sort({ createdAt: -1 });
+    const skip = (page - 1) * limit;
 
-    res.json(orders);
-  } catch (err) {
-    next(err);
+    const orders = await Order.find(query)
+      .populate("buyerId", "name email profilePic")
+      .populate("sellerId", "name email profilePic")
+      .populate("gigId", "title category gigThumbnail")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await Order.countDocuments(query);
+
+    res.json({
+      orders,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalOrders: total,
+        hasNext: page * limit < total,
+        hasPrev: page > 1
+      }
+    });
+  } catch (error) {
+    console.error("Get orders error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-/**
- * GET a single order by ID
- */
-const getOrderById = async (req, res, next) => {
+// Get single order by ID
+const getOrderById = async (req, res) => {
   try {
-    const orderId = req.params.id;
+    const { orderId } = req.params;
+    const userId = req.user.id;
 
     const order = await Order.findById(orderId)
-      .populate('gigId')
-      .populate('buyerId', 'name email')
-      .populate('sellerId', 'name email');
+      .populate("buyerId", "name email profilePic")
+      .populate("sellerId", "name email profilePic")
+      .populate("gigId", "title category gigThumbnail gigImages");
 
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-
-    // Only buyer, seller, or admin can fetch
-    if (
-      order.buyerId._id.toString() !== req.user._id.toString() &&
-      order.sellerId._id.toString() !== req.user._id.toString() &&
-      req.user.role !== 'admin'
-    ) {
-      return res.status(403).json({ message: 'Unauthorized' });
+    if (!order) {
+      return res.status(404).json({ msg: "Order not found" });
     }
 
-    res.json(order);
-  } catch (err) {
-    next(err);
+    // Check if user has access to this order
+    if (order.buyerId._id.toString() !== userId && order.sellerId._id.toString() !== userId) {
+      return res.status(403).json({ msg: "Access denied" });
+    }
+
+    res.json({ order });
+  } catch (error) {
+    console.error("Get order error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-/**
- * UPDATE order status (only seller or admin)
- */
-const updateOrderStatus = async (req, res, next) => {
+// Update order status (freelancer only)
+const updateOrderStatus = async (req, res) => {
   try {
-    const orderId = req.params.id;
-    const { status } = req.body;
-    const allowedStatus = ['Pending', 'In Progress', 'Delivered', 'Completed', 'Cancelled'];
+    const { orderId } = req.params;
+    const { status, deliveryFiles } = req.body;
+    const userId = req.user.id;
 
-    if (!allowedStatus.includes(status)) {
-      return res.status(400).json({ message: 'Invalid status' });
+    if (req.user.role !== "freelancer") {
+      return res.status(403).json({ msg: "Only freelancers can update order status" });
     }
 
     const order = await Order.findById(orderId);
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-
-    if (
-      order.sellerId.toString() !== req.user._id.toString() &&
-      req.user.role !== 'admin'
-    ) {
-      return res.status(403).json({ message: 'Unauthorized' });
+    if (!order) {
+      return res.status(404).json({ msg: "Order not found" });
     }
 
-    order.status = status;
-    order.updatedAt = Date.now();
-    await order.save();
+    if (order.sellerId.toString() !== userId) {
+      return res.status(403).json({ msg: "Access denied" });
+    }
 
-    res.json(order);
-  } catch (err) {
-    next(err);
+    // Validate status transition
+    const validTransitions = {
+      "Pending": ["In Progress"],
+      "In Progress": ["Delivered"],
+      "Delivered": ["Completed"],
+      "Completed": [],
+      "Cancelled": []
+    };
+
+    if (!validTransitions[order.status].includes(status)) {
+      return res.status(400).json({ 
+        msg: `Cannot change status from ${order.status} to ${status}` 
+      });
+    }
+
+    // Update order
+    const updateData = { status };
+    if (deliveryFiles && status === "Delivered") {
+      updateData.deliveryFiles = deliveryFiles;
+    }
+
+    const updatedOrder = await Order.findByIdAndUpdate(
+      orderId,
+      updateData,
+      { new: true }
+    ).populate([
+      { path: "buyerId", select: "name email profilePic" },
+      { path: "sellerId", select: "name email profilePic" },
+      { path: "gigId", select: "title category gigThumbnail" }
+    ]);
+
+    res.json({
+      msg: "Order status updated successfully",
+      order: updatedOrder
+    });
+  } catch (error) {
+    console.error("Update order status error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-/**
- * DELIVER work (seller uploads files, marks as 'Delivered')
- * Expects file upload on req.files
- */
-const deliverOrder = async (req, res, next) => {
+// Request revision (client only)
+const requestRevision = async (req, res) => {
   try {
-    const orderId = req.params.id;
-    const order = await Order.findById(orderId);
+    const { orderId } = req.params;
+    const { revisionNotes } = req.body;
+    const userId = req.user.id;
 
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-    if (
-      order.sellerId.toString() !== req.user._id.toString() &&
-      req.user.role !== 'admin'
-    ) {
-      return res.status(403).json({ message: 'Unauthorized' });
+    if (req.user.role !== "client") {
+      return res.status(403).json({ msg: "Only clients can request revisions" });
     }
 
-    // Accept upload (Cloudinary or similar, via multer)
-    const deliveryFiles = req.files?.map(file => file.path) || []; // Adjust for your upload structure
-
-    order.deliveryFiles = (order.deliveryFiles || []).concat(deliveryFiles);
-    order.status = 'Delivered';
-    order.updatedAt = Date.now();
-    await order.save();
-
-    res.json(order);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * REQUEST revision (client)
- */
-const requestRevision = async (req, res, next) => {
-  try {
-    const orderId = req.params.id;
     const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ msg: "Order not found" });
+    }
 
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-    if (order.buyerId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Only buyer can request revision' });
+    if (order.buyerId.toString() !== userId) {
+      return res.status(403).json({ msg: "Access denied" });
+    }
+
+    if (order.status !== "Delivered") {
+      return res.status(400).json({ msg: "Can only request revision for delivered orders" });
     }
 
     if (order.revisionsLeft <= 0) {
-      return res.status(400).json({ message: "No revisions left" });
+      return res.status(400).json({ msg: "No revisions left" });
     }
 
-    order.revisionsLeft -= 1;
-    order.status = "In Progress";
-    order.updatedAt = Date.now();
-    await order.save();
+    // Update order
+    const updatedOrder = await Order.findByIdAndUpdate(
+      orderId,
+      {
+        status: "In Progress",
+        revisionsLeft: order.revisionsLeft - 1,
+        $push: { revisionNotes: { note: revisionNotes, requestedAt: new Date() } }
+      },
+      { new: true }
+    ).populate([
+      { path: "buyerId", select: "name email profilePic" },
+      { path: "sellerId", select: "name email profilePic" },
+      { path: "gigId", select: "title category gigThumbnail" }
+    ]);
 
-    res.json(order);
-  } catch (err) {
-    next(err);
+    res.json({
+      msg: "Revision requested successfully",
+      order: updatedOrder
+    });
+  } catch (error) {
+    console.error("Request revision error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-// CANCEL order (buyer, seller, or admin)
-const cancelOrder = async (req, res, next) => {
+// Complete order (client only)
+const completeOrder = async (req, res) => {
   try {
-    const orderId = req.params.id;
-    const order = await Order.findById(orderId);
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    const { orderId } = req.params;
+    const userId = req.user.id;
 
-    // Only buyer, seller or admin
-    if (
-      order.buyerId.toString() !== req.user._id.toString() &&
-      order.sellerId.toString() !== req.user._id.toString() &&
-      req.user.role !== 'admin'
-    ) {
-      return res.status(403).json({ message: 'Unauthorized' });
+    if (req.user.role !== "client") {
+      return res.status(403).json({ msg: "Only clients can complete orders" });
     }
 
-    order.status = 'Cancelled';
-    order.updatedAt = Date.now();
-    await order.save();
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ msg: "Order not found" });
+    }
 
-    res.json(order);
-  } catch (err) {
-    next(err);
+    if (order.buyerId.toString() !== userId) {
+      return res.status(403).json({ msg: "Access denied" });
+    }
+
+    if (order.status !== "Delivered") {
+      return res.status(400).json({ msg: "Can only complete delivered orders" });
+    }
+
+    // Update order status
+    const updatedOrder = await Order.findByIdAndUpdate(
+      orderId,
+      { status: "Completed" },
+      { new: true }
+    ).populate([
+      { path: "buyerId", select: "name email profilePic" },
+      { path: "sellerId", select: "name email profilePic" },
+      { path: "gigId", select: "title category gigThumbnail" }
+    ]);
+
+    res.json({
+      msg: "Order completed successfully",
+      order: updatedOrder
+    });
+  } catch (error) {
+    console.error("Complete order error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-/**
- * LEAVE REVIEW (client after Completed)
- * Expects: { rating, comment }
- */
-const leaveReview = async (req, res, next) => {
+// Cancel order
+const cancelOrder = async (req, res) => {
   try {
-    const orderId = req.params.id;
-    const { rating, comment } = req.body;
+    const { orderId } = req.params;
+    const userId = req.user.id;
+
     const order = await Order.findById(orderId);
-
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-    if (order.buyerId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Only buyer can leave review' });
-    }
-    if (order.status !== 'Completed') {
-      return res.status(400).json({ message: 'Order must be Completed to leave review' });
+    if (!order) {
+      return res.status(404).json({ msg: "Order not found" });
     }
 
-    order.feedback = { rating, comment };
-    await order.save();
+    // Only buyer or seller can cancel
+    if (order.buyerId.toString() !== userId && order.sellerId.toString() !== userId) {
+      return res.status(403).json({ msg: "Access denied" });
+    }
 
-    res.json(order);
-  } catch (err) {
-    next(err);
+    // Can only cancel pending or in progress orders
+    if (!["Pending", "In Progress"].includes(order.status)) {
+      return res.status(400).json({ msg: "Cannot cancel this order" });
+    }
+
+    // Update order status
+    const updatedOrder = await Order.findByIdAndUpdate(
+      orderId,
+      { status: "Cancelled" },
+      { new: true }
+    ).populate([
+      { path: "buyerId", select: "name email profilePic" },
+      { path: "sellerId", select: "name email profilePic" },
+      { path: "gigId", select: "title category gigThumbnail" }
+    ]);
+
+    res.json({
+      msg: "Order cancelled successfully",
+      order: updatedOrder
+    });
+  } catch (error) {
+    console.error("Cancel order error:", error);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
-// ==========================
-// EXPORT ALL CONTROLLER FNS
-// ==========================
+// Get order statistics
+const getOrderStats = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let query = {};
+    if (userRole === "client") {
+      query.buyerId = userId;
+    } else {
+      query.sellerId = userId;
+    }
+
+    const stats = await Order.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$amount" }
+        }
+      }
+    ]);
+
+    const totalOrders = await Order.countDocuments(query);
+    const totalAmount = await Order.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]);
+
+    const formattedStats = {
+      totalOrders,
+      totalAmount: totalAmount[0]?.total || 0,
+      byStatus: stats.reduce((acc, stat) => {
+        acc[stat._id] = { count: stat.count, amount: stat.totalAmount };
+        return acc;
+      }, {})
+    };
+
+    res.json({ stats: formattedStats });
+  } catch (error) {
+    console.error("Get order stats error:", error);
+    res.status(500).json({ msg: "Server error" });
+  }
+};
+
 module.exports = {
   createOrder,
-  getOrdersForUser,
+  getMyOrders,
   getOrderById,
   updateOrderStatus,
-  deliverOrder,
   requestRevision,
+  completeOrder,
   cancelOrder,
-  leaveReview,
+  getOrderStats
 };
